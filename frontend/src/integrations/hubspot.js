@@ -12,7 +12,7 @@ export const HubspotIntegration = ({ user, org, integrationParams, setIntegratio
 
     // Function to initiate the HubSpot OAuth process
     const handleConnectClick = async () => {
-        try {2
+        try {
             setIsConnecting(true);
 
             // Request the authorization URL from the backend
