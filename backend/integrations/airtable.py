@@ -9,9 +9,12 @@ import httpx
 import asyncio
 import base64
 import hashlib
-
 import requests
 from integrations.integration_item import IntegrationItem
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+
+router = APIRouter()
 
 from redis_client import add_key_value_redis, get_value_redis, delete_key_redis
 
@@ -22,9 +25,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Fetch HubSpot credentials from .env
-CLIENT_ID = os.getenv("HUBSPOT_CLIENT_ID")
-CLIENT_SECRET = os.getenv("HUBSPOT_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("HUBSPOT_REDIRECT_URI")
+CLIENT_ID = os.getenv("AIRTABLE_CLIENT_ID")
+CLIENT_SECRET = os.getenv("AIRTABLE_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("AIRTABLE_REDIRECT_URI")
 authorization_url = f'https://airtable.com/oauth2/v1/authorize?client_id={CLIENT_ID}&response_type=code&owner=user&redirect_uri=http%3A%2F%2Flocalhost%3A8000%2Fintegrations%2Fairtable%2Foauth2callback'
 
 encoded_client_id_secret = base64.b64encode(f'{CLIENT_ID}:{CLIENT_SECRET}'.encode()).decode()
@@ -145,7 +148,28 @@ def fetch_items(
         else:
             return
 
+from fastapi import Response
 
+@router.post("/items")
+async def get_airtable_items(credentials: dict):
+    try:
+        result = await get_items_airtable(credentials.get('credentials'))
+        return JSONResponse(
+            content=result,
+            headers={
+                "Access-Control-Allow-Origin": "http://localhost:3000",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "http://localhost:3000",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
 async def get_items_airtable(credentials) -> list[IntegrationItem]:
     credentials = json.loads(credentials)
     url = 'https://api.airtable.com/v0/meta/bases'

@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-
-
+from integrations.airtable import router as airtable_router
 from integrations.airtable import authorize_airtable, get_items_airtable, oauth2callback_airtable, get_airtable_credentials
 from integrations.notion import authorize_notion, get_items_notion, oauth2callback_notion, get_notion_credentials
 from integrations.hubspot import authorize_hubspot, get_hubspot_credentials, get_items_hubspot, oauth2callback_hubspot
+from integrations.airtable import router as airtable_router
 
 app = FastAPI()
 
@@ -14,16 +14,32 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
+
+app.include_router(airtable_router, prefix="/integrations/airtable")
 
 @app.get('/')
 def read_root():
     return {'Ping': 'Pong'}
 
+@app.options("/integrations/airtable/items")
+async def options_route():
+    return JSONResponse(
+        status_code=200,
+        content={"message": "OK"},
+        headers={
+            "Access-Control-Allow-Origin": "http://localhost:3000",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Credentials": "true",
+        },
+    )
 
 # Airtable
 @app.post('/integrations/airtable/authorize')
@@ -42,6 +58,10 @@ async def get_airtable_credentials_integration(user_id: str = Form(...), org_id:
 async def get_airtable_items(credentials: str = Form(...)):
     return await get_items_airtable(credentials)
 
+@app.post("/integrations/airtable/items")
+async def airtable_items(request: Request):
+    body = await request.json()
+    return await get_items_airtable(body.get('credentials'))
 
 # Notion
 @app.post('/integrations/notion/authorize')

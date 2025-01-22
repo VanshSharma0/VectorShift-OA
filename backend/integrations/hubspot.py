@@ -1,122 +1,206 @@
+import datetime
 import json
 import secrets
 from fastapi import Request, HTTPException
 from fastapi.responses import HTMLResponse
-import httpx
 import base64
-import os
-import aioredis
+import httpx
+import asyncio
 
+from integrations.integration_item import IntegrationItem
+from redis_client import add_key_value_redis, get_value_redis, delete_key_redis
+
+import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
 
-# Fetch HubSpot credentials from .env
 CLIENT_ID = os.getenv("HUBSPOT_CLIENT_ID")
 CLIENT_SECRET = os.getenv("HUBSPOT_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("HUBSPOT_REDIRECT_URI")
-SCOPE = "crm.objects.contacts.read"
-TOKEN_URL = "https://api.hubapi.com/oauth/v1/token"
-AUTHORIZATION_URL = "https://app.hubspot.com/oauth/authorize"
 
+SCOPES = "crm.objects.contacts.read crm.objects.companies.read crm.objects.deals.read"
+authorization_url = f"https://app.hubspot.com/oauth/authorize"
 
-# Step 1: Generate the authorization URL
 async def authorize_hubspot(user_id, org_id):
-    # Generate a unique state to prevent CSRF
+    """Initialize OAuth flow for HubSpot"""
     state_data = {
-        "state": secrets.token_urlsafe(32),
-        "user_id": user_id,
-        "org_id": org_id,
+        'state': secrets.token_urlsafe(32),
+        'user_id': user_id,
+        'org_id': org_id
     }
-    encoded_state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
-
+    encoded_state = base64.urlsafe_b64encode(json.dumps(state_data).encode('utf-8')).decode('utf-8')
+    
+    # Store state in Redis for validation
+    await add_key_value_redis(f'hubspot_state:{org_id}:{user_id}', json.dumps(state_data), expire=600)
+    
     auth_url = (
-        f"{AUTHORIZATION_URL}?client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}&scope={SCOPE}&state={encoded_state}"
+        f"{authorization_url}"
+        f"?client_id={CLIENT_ID}"
+        f"&scope={SCOPES}"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&state={encoded_state}"
     )
+    
     return auth_url
 
-
-# Step 2: Handle the OAuth2 callback
 async def oauth2callback_hubspot(request: Request):
-    if "error" in request.query_params:
-        raise HTTPException(status_code=400, detail=request.query_params["error"])
-
-    code = request.query_params.get("code")
-    encoded_state = request.query_params.get("state")
-
-    # Decode state and validate it
-    state_data = json.loads(base64.urlsafe_b64decode(encoded_state.encode()).decode())
+    """Handle OAuth callback from HubSpot"""
+    if request.query_params.get('error'):
+        raise HTTPException(status_code=400, detail=request.query_params.get('error_description'))
+    
+    code = request.query_params.get('code')
+    encoded_state = request.query_params.get('state')
+    state_data = json.loads(base64.urlsafe_b64decode(encoded_state).decode('utf-8'))
+    
+    original_state = state_data.get('state')
+    user_id = state_data.get('user_id')
+    org_id = state_data.get('org_id')
+    
+    saved_state = await get_value_redis(f'hubspot_state:{org_id}:{user_id}')
+    
+    if not saved_state or original_state != json.loads(saved_state).get('state'):
+        raise HTTPException(status_code=400, detail='Invalid state parameter')
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            TOKEN_URL,
+            'https://api.hubapi.com/oauth/v1/token',
             data={
-                "grant_type": "authorization_code",
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "redirect_uri": REDIRECT_URI,
-                "code": code,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                'grant_type': 'authorization_code',
+                'client_id': CLIENT_ID,
+                'client_secret': CLIENT_SECRET,
+                'redirect_uri': REDIRECT_URI,
+                'code': code
+            }
         )
-        response.raise_for_status()
+        
+    await delete_key_redis(f'hubspot_state:{org_id}:{user_id}')
+    await add_key_value_redis(
+        f'hubspot_credentials:{org_id}:{user_id}',
+        json.dumps(response.json()),
+        expire=600
+    )
+    
+    close_window_script = """
+    <html>
+        <script>
+            window.close();
+        </script>
+    </html>
+    """
+    return HTMLResponse(content=close_window_script)
 
-    token_data = response.json()
-
-    # Save token_data (e.g., access_token, refresh_token) and associated user/org
-    # Example: Save to Redis, a database, or another storage solution
-    # store_credentials(user_id=state_data["user_id"], org_id=state_data["org_id"], credentials=token_data)
-
-    return HTMLResponse("<html><script>window.close();</script></html>")
-
-
-# Step 3: Retrieve saved credentials
 async def get_hubspot_credentials(user_id, org_id):
-    # Connect to Redis (replace with your Redis URL or connection settings)
-    redis = await aioredis.from_url("redis://localhost", decode_responses=True)
-
-    # Create a unique key for storing credentials
-    redis_key = f"hubspot:credentials:{user_id}:{org_id}"
-
-    # Fetch the credentials from Redis
-    credentials = await redis.hgetall(redis_key)
-
+    """Retrieve stored HubSpot credentials"""
+    credentials = await get_value_redis(f'hubspot_credentials:{org_id}:{user_id}')
     if not credentials:
-        raise HTTPException(status_code=404, detail="HubSpot credentials not found.")
-
-    # Example of expected credentials structure:
-    # {
-    #     "access_token": "your-access-token",
-    #     "refresh_token": "your-refresh-token",
-    #     "expires_in": 3600,
-    #     "expires_at": "timestamp-when-token-expires"
-    # }
-
+        raise HTTPException(status_code=400, detail='No credentials found')
+    
+    credentials = json.loads(credentials)
+    await delete_key_redis(f'hubspot_credentials:{org_id}:{user_id}')
     return credentials
 
-# Step 4: Process HubSpot items into integration-specific metadata
-async def create_integration_item_metadata_object(response_json):
-    return [
-        {
-            "id": item["id"],
-            "name": item.get("properties", {}).get("firstname", "Unknown"),
-            "email": item.get("properties", {}).get("email", "Unknown"),
-        }
-        for item in response_json.get("results", [])
-    ]
-
-
-# Step 5: Fetch items from HubSpot (e.g., contacts)
 async def get_items_hubspot(credentials):
-    access_token = credentials["access_token"]
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            "https://api.hubapi.com/crm/v3/objects/contacts",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        response.raise_for_status()
+    """Fetch HubSpot items using credentials"""
+    credentials = json.loads(credentials) if isinstance(credentials, str) else credentials
+    access_token = credentials.get('access_token')
+    
+    if not access_token:
+        raise HTTPException(status_code=400, detail='Invalid credentials')
 
-    response_json = response.json()
-    return await create_integration_item_metadata_object(response_json)
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json'
+    }
+    
+    async with httpx.AsyncClient() as client:
+        # Fetch different HubSpot resources in parallel
+        contacts_response, companies_response, deals_response = await asyncio.gather(
+            client.get('https://api.hubapi.com/crm/v3/objects/contacts', headers=headers),
+            client.get('https://api.hubapi.com/crm/v3/objects/companies', headers=headers),
+            client.get('https://api.hubapi.com/crm/v3/objects/deals', headers=headers)
+        )
+
+    integration_items = []
+    
+    # Create parent CRM item
+    crm_item = IntegrationItem(
+        id="hubspot_crm",
+        name="HubSpot CRM",
+        type="CRM",
+        parent_id=None,
+        parent_path_or_name=None
+    )
+    integration_items.append(crm_item)
+    
+    # Process contacts
+    if contacts_response.status_code == 200:
+        contacts_data = contacts_response.json()
+        contacts_item = IntegrationItem(
+            id="hubspot_contacts",
+            name="Contacts",
+            type="ContactList",
+            parent_id="hubspot_crm",
+            parent_path_or_name="HubSpot CRM"
+        )
+        integration_items.append(contacts_item)
+        
+        for contact in contacts_data.get('results', []):
+            integration_items.append(
+                IntegrationItem(
+                    id=f"contact_{contact['id']}",
+                    name=f"{contact.get('properties', {}).get('firstname', '')} {contact.get('properties', {}).get('lastname', '')}",
+                    type="Contact",
+                    parent_id="hubspot_contacts",
+                    parent_path_or_name="Contacts"
+                )
+            )
+    
+    # Process companies
+    if companies_response.status_code == 200:
+        companies_data = companies_response.json()
+        companies_item = IntegrationItem(
+            id="hubspot_companies",
+            name="Companies",
+            type="CompanyList",
+            parent_id="hubspot_crm",
+            parent_path_or_name="HubSpot CRM"
+        )
+        integration_items.append(companies_item)
+        
+        for company in companies_data.get('results', []):
+            integration_items.append(
+                IntegrationItem(
+                    id=f"company_{company['id']}",
+                    name=company.get('properties', {}).get('name', 'Unnamed Company'),
+                    type="Company",
+                    parent_id="hubspot_companies",
+                    parent_path_or_name="Companies"
+                )
+            )
+    
+    # Process deals
+    if deals_response.status_code == 200:
+        deals_data = deals_response.json()
+        deals_item = IntegrationItem(
+            id="hubspot_deals",
+            name="Deals",
+            type="DealList",
+            parent_id="hubspot_crm",
+            parent_path_or_name="HubSpot CRM"
+        )
+        integration_items.append(deals_item)
+        
+        for deal in deals_data.get('results', []):
+            integration_items.append(
+                IntegrationItem(
+                    id=f"deal_{deal['id']}",
+                    name=deal.get('properties', {}).get('dealname', 'Unnamed Deal'),
+                    type="Deal",
+                    parent_id="hubspot_deals",
+                    parent_path_or_name="Deals"
+                )
+            )
+    
+    return integration_items
