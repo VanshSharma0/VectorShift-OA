@@ -4,7 +4,7 @@ from integrations.airtable import router as airtable_router
 from integrations.airtable import authorize_airtable, get_items_airtable, oauth2callback_airtable, get_airtable_credentials
 from integrations.notion import authorize_notion, get_items_notion, oauth2callback_notion, get_notion_credentials
 from integrations.hubspot import authorize_hubspot, get_hubspot_credentials, get_items_hubspot, oauth2callback_hubspot
-from integrations.airtable import router as airtable_router
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
@@ -14,7 +14,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,4 +95,11 @@ async def get_hubspot_credentials_integration(user_id: str = Form(...), org_id: 
 
 @app.post('/integrations/hubspot/load')
 async def load_slack_data_integration(credentials: str = Form(...)):
+    return await get_items_hubspot(credentials)
+
+@app.post("/integrations/hubspot/items")
+async def load_hubspot_items(request: Request):
+    body = await request.json()
+    credentials = body.get('credentials')
+    print(f"Received credentials: {credentials}")  # Debugging line
     return await get_items_hubspot(credentials)
