@@ -76,7 +76,7 @@ export const HubspotIntegration = ({ user, org, integrationParams, setIntegratio
                 setItems(response.data);
             }
         } catch (error) {
-            // console.error('Error fetching HubSpot items:', error);
+            console.error('Error fetching HubSpot items:', error);
             setError('Failed to fetch HubSpot items');
         } finally {
             setIsLoading(false);
